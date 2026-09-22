@@ -1,0 +1,27 @@
+# This software was developed at the National Institute of Standards
+# and Technology by employees of the Federal Government in the course
+# of their official duties.  Pursuant to title 17 Section 105 of the
+# United States Code this software is not subject to copyright
+# protection and is in the public domain.  NIST assumes no
+# responsibility whatsoever for its use by other parties, and makes
+# no guarantees, expressed or implied, about its quality,
+# reliability, or any other characteristic.
+#
+# We would appreciate acknowledgement if the software is used.
+
+name: act-test
+on: [push, workflow_dispatch]
+
+jobs:
+  sign:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sign image (self-test)
+        uses: ./
+        with:
+          image: localhost:5000/app:latest
+          private-key: ${{ secrets.SIGNING_KEY }}
+          verify-inclusion-proof: 'false'   # first pass: pure wiring, no network
+          tlog-upload: false

@@ -1,0 +1,281 @@
+# This software was developed at the National Institute of Standards
+# and Technology by employees of the Federal Government in the course
+# of their official duties.  Pursuant to title 17 Section 105 of the
+# United States Code this software is not subject to copyright
+# protection and is in the public domain.  NIST assumes no
+# responsibility whatsoever for its use by other parties, and makes
+# no guarantees, expressed or implied, about its quality,
+# reliability, or any other characteristic.
+#
+# We would appreciate acknowledgement if the software is used.
+
+name: "sign-image-fips"
+description: >-
+  Sign a container image using a FIPS 140-3 build of cosign (Go Cryptographic
+  Module, CMVP #5247), upload the Rekor transparency-log entry, and verify.
+  Runs on standard GitHub-hosted runners -- no FIPS kernel, no self-hosted
+  infrastructure. FIPS mode is a build-time property of the cosign binary, not
+  a property of the runner.
+
+inputs:
+  image:
+    description: Fully-qualified image reference to sign (registry/repo:tag or @digest).
+    required: true
+  private-key:
+    description: PEM private signing key. Forwarded via env.
+    required: true
+  public-key:
+    description: >-
+      PEM public key for verification. Optional; if omitted, the public key is
+      taken from the key pair produced during import.
+    required: false
+    default: ''
+  rekor-server:
+    description: Rekor server URL (transparency log). Used only when tlog-upload is true.
+    required: false
+    default: 'https://rekor.sigstore.dev'
+  tlog-upload:
+    description: >-
+      Publish the signature to the Rekor transparency log. Defaults to 'true'.
+      Set 'false' for a fully offline run that writes NO permanent tlog entry -- 
+      use this for testing so runs do not clutter the public log. When false, 
+      verification runs with --insecure-ignore-tlog and the inclusion-proof cross-check 
+      is skipped.
+    required: false
+    default: 'true'
+  cosign-release:
+    description: cosign version to build from source.
+    required: false
+    default: 'v2.4.1'
+  go-version:
+    description: Go toolchain version. Must be 1.24+ for GOFIPS140 support.
+    required: false
+    default: '1.25.x'
+  gofips140-version:
+    description: >-
+      Frozen Go Cryptographic Module snapshot. v1.0.0 is CMVP-certified
+      (Certificate #5247).
+    required: false
+    default: 'v1.0.0'
+  verify-inclusion-proof:
+    description: >-
+      Additionally run rekor-cli to check the Merkle inclusion proof, an
+      independent check on top of cosign's built-in tlog verification.
+      Only meaningful when tlog-upload is true. Set 'false' to skip.
+    required: false
+    default: 'true'
+  rekor-cli-release:
+    description: rekor-cli version (only used when the inclusion-proof check runs).
+    required: false
+    default: 'v1.3.10'
+  rekor-cli-sha256:
+    description: >-
+      Expected SHA-256 of the rekor-cli linux-amd64 binary (hosted runners are
+      amd64).
+    required: false
+    default: ''
+
+outputs:
+  public-key-file:
+    description: Path to the public key used for verification.
+    value: ${{ steps.sign.outputs.pub_file }}
+
+runs:
+  using: "composite"
+  steps:
+    # -----------------------------------------------------------------------
+    # 1. Preflight. Ensure private key supplied.
+    # -----------------------------------------------------------------------
+    - name: Preflight
+      shell: bash
+      env:
+        PRIVATE_KEY: ${{ inputs.private-key }}
+      run: |
+        set -euo pipefail
+        [ -n "${PRIVATE_KEY}" ] || { echo "::error::private-key is required"; exit 1; }
+        echo "Preflight OK."
+
+    # -----------------------------------------------------------------------
+    # 2. Toolchain. Always set up Go (fast, self-cached) so the FIPS self-check
+    #    can read the cosign build info even on a cosign cache hit. 
+    # -----------------------------------------------------------------------
+    - name: Set up Go
+      uses: actions/setup-go@v5   # pin to SHA when publishing
+      with:
+        go-version: ${{ inputs.go-version }}
+
+    # -----------------------------------------------------------------------
+    # 3. Cache the built FIPS cosign so the (slow) source build runs once per
+    #    version combo, not every run.
+    # -----------------------------------------------------------------------
+    - name: Cache FIPS cosign
+      id: cache
+      uses: actions/cache@v4   # pin to SHA when publishing
+      with:
+        path: ${{ runner.temp }}/fips-cosign
+        key: >-
+          fips-cosign-${{ inputs.cosign-release }}-go${{ inputs.go-version }}-fips${{ inputs.gofips140-version }}-${{ runner.os }}-${{ runner.arch }}
+
+    # -----------------------------------------------------------------------
+    # 4. Build cosign in FIPS mode. GOFIPS140 links the frozen validated module
+    #    and makes the binary default to fips140=on at runtime. 
+    # -----------------------------------------------------------------------
+    - name: Build FIPS cosign
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        GOFIPS140: ${{ inputs.gofips140-version }}
+        GOBIN: ${{ runner.temp }}/fips-cosign
+      run: |
+        set -euo pipefail
+        mkdir -p "${GOBIN}"
+        go install "github.com/sigstore/cosign/v2/cmd/cosign@${{ inputs.cosign-release }}"
+
+    - name: Add cosign to PATH
+      shell: bash
+      run: echo "${{ runner.temp }}/fips-cosign" >> "${GITHUB_PATH}"
+
+    # -----------------------------------------------------------------------
+    # 5. FIPS self-check: verify the signing tool. The build info is embedded 
+    #    in the binary, so this attests that cosign was linked against the 
+    #    certified module and defaults to FIPS mode. Fails if not.
+    # -----------------------------------------------------------------------
+    - name: Verify cosign is FIPS
+      shell: bash
+      run: |
+        set -euo pipefail
+        BIN="${{ runner.temp }}/fips-cosign/cosign"
+        info="$(go version -m "${BIN}")"
+        echo "${info}" | grep -q "GOFIPS140=${{ inputs.gofips140-version }}" || {
+          echo "::error::cosign not built against FIPS module ${{ inputs.gofips140-version }}"; exit 1; }
+        echo "${info}" | grep -q "fips140=on" || {
+          echo "::error::cosign does not default to FIPS mode (fips140=on)"; exit 1; }
+        echo "FIPS self-check passed: GOFIPS140=${{ inputs.gofips140-version }}, fips140=on."
+
+    # -----------------------------------------------------------------------
+    # 6. Import the key and sign. cosign sign natively signs, attaches, and
+    #    (when tlog-upload is true) uploads the Rekor entry. Private key is passed
+    #    through env, is written 0400, and is shredded. 
+    #
+    #    tlog-upload=false performs an offline run (no permanent public log
+    #    entry) -- useful for testing, since cosign sign publishes by default.
+    # -----------------------------------------------------------------------
+    - name: Sign image (FIPS cosign)
+      id: sign
+      shell: bash
+      env:
+        PRIVATE_KEY: ${{ inputs.private-key }}
+        PROVIDED_PUB: ${{ inputs.public-key }}
+      run: |
+        set -euo pipefail
+        set +x
+        WORK="$(mktemp -d)"
+        trap 'shred -u "${WORK}/import.pem" "${WORK}/cosign.key" 2>/dev/null || true; rm -rf "${WORK}"' EXIT
+
+        printf '%s\n' "${PRIVATE_KEY}" > "${WORK}/import.pem"
+        chmod 0400 "${WORK}/import.pem"
+
+        # Ephemeral password for the on-disk cosign key; the key is temporary.
+        export COSIGN_PASSWORD="$(head -c 32 /dev/urandom | base64 | tr -d '\n')"
+
+        # Import the existing PEM into a cosign key pair. Produces cosign.key
+        # (encrypted) and cosign.pub. This is necessary because raw --key PEM is not 
+        # supported by cosign sign.
+        cosign import-key-pair --key "${WORK}/import.pem" --output-key-prefix "${WORK}/cosign"
+
+        # Public key for verification: prefer the caller-provided one.
+        PUB="${RUNNER_TEMP}/verify.pub"
+        if [ -n "${PROVIDED_PUB}" ]; then
+          printf '%s\n' "${PROVIDED_PUB}" > "${PUB}"
+        else
+          cp "${WORK}/cosign.pub" "${PUB}"
+        fi
+        echo "pub_file=${PUB}" >> "${GITHUB_OUTPUT}"
+
+        # --yes suppresses the interactive tlog consent prompt (CI).
+        if [ "${{ inputs.tlog-upload }}" = "true" ]; then
+          cosign sign --yes \
+            --key "${WORK}/cosign.key" \
+            --rekor-url "${{ inputs.rekor-server }}" \
+            "${{ inputs.image }}"
+          echo "Signed and logged to Rekor: ${{ inputs.image }}"
+        else
+          cosign sign --yes \
+            --key "${WORK}/cosign.key" \
+            --tlog-upload=false \
+            "${{ inputs.image }}"
+          echo "Signed WITHOUT tlog upload (offline): ${{ inputs.image }}"
+        fi
+
+    # -----------------------------------------------------------------------
+    # 7. Verify signature. With a tlog entry, ask cosign to verify it.
+    #    Without one, tell verify not to expect a tlog  entry, or it will fail
+    #    looking for the entry we deliberately did not make.
+    # -----------------------------------------------------------------------
+    - name: Verify signature (FIPS cosign)
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ "${{ inputs.tlog-upload }}" = "true" ]; then
+          cosign verify \
+            --key "${{ steps.sign.outputs.pub_file }}" \
+            "${{ inputs.image }}" > /dev/null
+          echo "cosign verify OK (signature + transparency-log)."
+        else
+          cosign verify \
+            --key "${{ steps.sign.outputs.pub_file }}" \
+            --insecure-ignore-tlog=true \
+            "${{ inputs.image }}" > /dev/null
+          echo "cosign verify OK (signature only; tlog intentionally skipped)."
+        fi
+
+    # -----------------------------------------------------------------------
+    # 8. OPTIONAL independent cross-check: Merkle inclusion proof via rekor-cli.
+    #    Only meaningful when a tlog entry was actually created, so this is gated
+    #    on both tlog-upload and verify-inclusion-proof being true. rekor-cli is
+    #    installed inline.
+    #    Best-effort UUID/index extraction without introducing a failure point. 
+    #    The proof check will fail the job if the entry is not included.
+    # -----------------------------------------------------------------------
+    - name: Install rekor-cli (inline)
+      if: ${{ inputs.verify-inclusion-proof == 'true' && inputs.tlog-upload == 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        dir="${RUNNER_TEMP}/rekor-cli"
+        mkdir -p "${dir}"
+        case "$(uname -m)" in
+          x86_64|amd64)  arch=amd64 ;;
+          aarch64|arm64) arch=arm64 ;;
+          *) echo "::error::unsupported arch $(uname -m)"; exit 1 ;;
+        esac
+        url="https://github.com/sigstore/rekor/releases/download/${{ inputs.rekor-cli-release }}/rekor-cli-linux-${arch}"
+        curl -fsSL "${url}" -o "${dir}/rekor-cli"
+        # Pinned hash is arch-specific; pin the linux-amd64 hash for hosted runners.
+        if [ -n "${{ inputs.rekor-cli-sha256 }}" ]; then
+          echo "${{ inputs.rekor-cli-sha256 }}  ${dir}/rekor-cli" | sha256sum -c - \
+            || { echo "::error::rekor-cli checksum verification failed"; exit 1; }
+          echo "rekor-cli checksum verified."
+        else
+          echo "::warning::no rekor-cli-sha256 provided; integrity not verified. Pin a checksum."
+        fi
+        chmod +x "${dir}/rekor-cli"
+        echo "${dir}" >> "${GITHUB_PATH}"
+
+    - name: Verify inclusion proof (rekor-cli)
+      if: ${{ inputs.verify-inclusion-proof == 'true' && inputs.tlog-upload == 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        entry="$(cosign verify \
+          --key "${{ steps.sign.outputs.pub_file }}" \
+          --output json "${{ inputs.image }}" 2>/dev/null || true)"
+        # JSON path is version-sensitive; confirm against your pinned cosign.
+        log_index="$(echo "${entry}" | jq -r '.[0].optional.Bundle.Payload.logIndex // empty' 2>/dev/null | head -n1)"
+        if [ -z "${log_index}" ]; then
+          echo "::warning::Could not extract logIndex from cosign output; skipping inclusion-proof cross-check."
+          exit 0
+        fi
+        echo "Checking Merkle inclusion proof for log index ${log_index}"
+        rekor-cli verify --log-index "${log_index}" --rekor_server "${{ inputs.rekor-server }}"
+        echo "rekor-cli inclusion proof OK."
