@@ -100,7 +100,7 @@ runs:
     #    can read the cosign build info even on a cosign cache hit. 
     # -----------------------------------------------------------------------
     - name: Set up Go
-      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
       with:
         go-version: ${{ inputs.go-version }}
 
@@ -110,7 +110,7 @@ runs:
     # -----------------------------------------------------------------------
     - name: Cache FIPS cosign
       id: cache
-      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
       with:
         path: ${{ runner.temp }}/fips-cosign
         key: >-
