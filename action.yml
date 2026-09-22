@@ -73,7 +73,7 @@ inputs:
       Expected SHA-256 of the rekor-cli linux-amd64 binary (hosted runners are
       amd64).
     required: false
-    default: ''
+    default: 'cf87be059e7e69230c4f958e6f70f332a8027ff0731ccc750c509fca17baa12d'
 
 outputs:
   public-key-file:
