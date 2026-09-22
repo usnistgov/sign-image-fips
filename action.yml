@@ -100,7 +100,7 @@ runs:
     #    can read the cosign build info even on a cosign cache hit. 
     # -----------------------------------------------------------------------
     - name: Set up Go
-      uses: actions/setup-go@v7   # pin to SHA when publishing
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
       with:
         go-version: ${{ inputs.go-version }}
 
@@ -110,7 +110,7 @@ runs:
     # -----------------------------------------------------------------------
     - name: Cache FIPS cosign
       id: cache
-      uses: actions/cache@v6   # pin to SHA when publishing
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
       with:
         path: ${{ runner.temp }}/fips-cosign
         key: >-
@@ -257,7 +257,7 @@ runs:
             || { echo "::error::rekor-cli checksum verification failed"; exit 1; }
           echo "rekor-cli checksum verified."
         else
-          echo "::warning::no rekor-cli-sha256 provided; integrity not verified. Pin a checksum."
+          echo "::warning::no rekor-cli-sha256 provided; integrity not verified."
         fi
         chmod +x "${dir}/rekor-cli"
         echo "${dir}" >> "${GITHUB_PATH}"
