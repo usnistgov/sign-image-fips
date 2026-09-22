@@ -100,7 +100,7 @@ runs:
     #    can read the cosign build info even on a cosign cache hit. 
     # -----------------------------------------------------------------------
     - name: Set up Go
-      uses: actions/setup-go@v5   # pin to SHA when publishing
+      uses: actions/setup-go@v7   # pin to SHA when publishing
       with:
         go-version: ${{ inputs.go-version }}
 
@@ -110,7 +110,7 @@ runs:
     # -----------------------------------------------------------------------
     - name: Cache FIPS cosign
       id: cache
-      uses: actions/cache@v4   # pin to SHA when publishing
+      uses: actions/cache@v6   # pin to SHA when publishing
       with:
         path: ${{ runner.temp }}/fips-cosign
         key: >-
